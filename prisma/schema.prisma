@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  name         String?
+  password     String
+  isAdmin      Boolean   @default(false)
+  plan         String    @default("free")
+  photosUsed   Int       @default(0)
+  photosLimit  Int       @default(3)
+  billingCycle String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  payments     Payment[]
+}
+
+model Payment {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  amount       Float
+  currency     String
+  plan         String
+  billingCycle String
+  method       String
+  txHash       String?
+  status       String   @default("PENDING")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
