@@ -1,25 +1,57 @@
 import { NextRequest, NextResponse } from 'next/server'
+import fs from 'fs/promises'
+import path from 'path'
 
 // Allow up to 60 seconds for AI processing
 export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
-// ─── AI Config from Environment ────────────────────────────────────
-const AI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1'
-const AI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai'
-const AI_CHAT_ID = process.env.ZAI_CHAT_ID || ''
-const AI_USER_ID = process.env.ZAI_USER_ID || ''
-const AI_TOKEN = process.env.ZAI_TOKEN || ''
+// ─── AI Config ─────────────────────────────────────────────────────
+interface AIConfig {
+  baseUrl: string
+  apiKey: string
+  chatId?: string
+  userId?: string
+  token?: string
+}
 
-function getAIHeaders(): Record<string, string> {
+async function loadAIConfig(): Promise<AIConfig> {
+  // Try loading from .z-ai-config file first
+  const configPaths = [
+    path.join(process.cwd(), '.z-ai-config'),
+  ]
+
+  for (const filePath of configPaths) {
+    try {
+      const configStr = await fs.readFile(filePath, 'utf-8')
+      const config = JSON.parse(configStr)
+      if (config.baseUrl && config.apiKey) {
+        return config
+      }
+    } catch {
+      // Continue to next
+    }
+  }
+
+  // Fallback to environment variables
+  return {
+    baseUrl: process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1',
+    apiKey: process.env.ZAI_API_KEY || 'Z.ai',
+    chatId: process.env.ZAI_CHAT_ID,
+    userId: process.env.ZAI_USER_ID,
+    token: process.env.ZAI_TOKEN,
+  }
+}
+
+function getAIHeaders(config: AIConfig): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'Authorization': `Bearer ${AI_API_KEY}`,
+    'Authorization': `Bearer ${config.apiKey}`,
     'X-Z-AI-From': 'Z',
   }
-  if (AI_CHAT_ID) headers['X-Chat-Id'] = AI_CHAT_ID
-  if (AI_USER_ID) headers['X-User-Id'] = AI_USER_ID
-  if (AI_TOKEN) headers['X-Token'] = AI_TOKEN
+  if (config.chatId) headers['X-Chat-Id'] = config.chatId
+  if (config.userId) headers['X-User-Id'] = config.userId
+  if (config.token) headers['X-Token'] = config.token
   return headers
 }
 
@@ -88,6 +120,26 @@ async function downloadImageAsBase64(imageUrl: string): Promise<string> {
   return buffer.toString('base64')
 }
 
+// ─── Make API call with fallback ───────────────────────────────────
+async function aiFetch(url: string, headers: Record<string, string>, body: object): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 45000)
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal
+    })
+    clearTimeout(timeout)
+    return response
+  } catch (error) {
+    clearTimeout(timeout)
+    throw error
+  }
+}
+
 // ─── POST Handler ──────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
@@ -106,10 +158,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No background or scenario selected' }, { status: 400 })
     }
 
+    const config = await loadAIConfig()
+    const headers = getAIHeaders(config)
+
     // ── Step 1: Analyze the image with Vision API ─────────────────
     console.log('[Edit] Step 1: Analyzing image with Vision AI...')
+    console.log('[Edit] Using base URL:', config.baseUrl)
 
-    const visionUrl = `${AI_BASE_URL}/chat/completions/vision`
+    const visionUrl = `${config.baseUrl}/chat/completions/vision`
     const visionBody = {
       messages: [
         {
@@ -142,16 +198,12 @@ Be specific but concise. Write as a single paragraph. Do NOT mention you are ana
       thinking: { type: 'disabled' }
     }
 
-    const visionResponse = await fetch(visionUrl, {
-      method: 'POST',
-      headers: getAIHeaders(),
-      body: JSON.stringify(visionBody)
-    })
+    const visionResponse = await aiFetch(visionUrl, headers, visionBody)
 
     if (!visionResponse.ok) {
       const errorText = await visionResponse.text()
       console.error('[Edit] Vision API error:', errorText)
-      throw new Error(`Vision analysis failed: ${visionResponse.status}`)
+      throw new Error(`Vision analysis failed (${visionResponse.status}). AI service may be temporarily unavailable.`)
     }
 
     const visionData = await visionResponse.json()
@@ -175,33 +227,28 @@ Be specific but concise. Write as a single paragraph. Do NOT mention you are ana
     // ── Step 3: Generate the hyperrealistic image ──────────────────
     console.log('[Edit] Step 3: Generating image...')
 
-    const imageGenUrl = `${AI_BASE_URL}/images/generations`
+    const imageGenUrl = `${config.baseUrl}/images/generations`
     const imageGenBody = {
       prompt: editPrompt,
       size: '768x1344'
     }
 
-    const imageGenResponse = await fetch(imageGenUrl, {
-      method: 'POST',
-      headers: getAIHeaders(),
-      body: JSON.stringify(imageGenBody)
-    })
+    const imageGenResponse = await aiFetch(imageGenUrl, headers, imageGenBody)
 
     if (!imageGenResponse.ok) {
       const errorText = await imageGenResponse.text()
       console.error('[Edit] Image gen error:', errorText)
-      throw new Error(`Image generation failed: ${imageGenResponse.status}`)
+      throw new Error(`Image generation failed (${imageGenResponse.status}). AI service may be temporarily unavailable.`)
     }
 
     const imageGenData = await imageGenResponse.json()
 
-    // Process result - SDK converts URLs to base64, we do the same
+    // Process result
     let resultImage: string | null = null
 
     if (imageGenData.data?.[0]?.base64) {
       resultImage = `data:image/png;base64,${imageGenData.data[0].base64}`
     } else if (imageGenData.data?.[0]?.url) {
-      // Download URL and convert to base64
       console.log('[Edit] Downloading generated image from URL...')
       const base64 = await downloadImageAsBase64(imageGenData.data[0].url)
       resultImage = `data:image/png;base64,${base64}`
