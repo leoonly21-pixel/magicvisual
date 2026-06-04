@@ -1,54 +1,51 @@
 import { NextResponse } from "next/server"
-import { PrismaClient } from "@prisma/client"
 
 export async function GET() {
   const projectId = "cmzhmqozbkdjucpjaaqb"
-  const password = "Leoolga1125"
-  const regions = ["us-east-1", "us-west-2", "eu-west-1", "sa-east-1", "ap-southeast-1", "eu-central-1", "ap-northeast-1", "us-east-2", "ca-central-1"]
+  // Try both with and without period
+  const passwords = ["Leoolga1125", "Leoolga1125."]
+  const regions = ["us-east-1", "us-west-2", "eu-west-1", "sa-east-1", "ap-southeast-1"]
   
   const results: Record<string, string> = {}
   
-  // Test direct connection first
-  try {
-    const directUrl = `postgresql://postgres:${password}@db.${projectId}.supabase.co:5432/postgres`
-    process.env.DATABASE_URL = directUrl
-    const prisma = new PrismaClient({
-      datasourceUrl: directUrl
-    })
-    await prisma.$queryRaw`SELECT 1`
-    results["direct"] = "SUCCESS"
-    await prisma.$disconnect()
-  } catch (err: any) {
-    results["direct"] = err.message?.slice(0, 100) || "failed"
-  }
+  const { PrismaClient } = await import("@prisma/client")
   
-  // Test pooler connections for each region
-  for (const region of regions) {
+  for (const password of passwords) {
+    // Test direct connection
     try {
-      const poolerUrl = `postgresql://postgres.${projectId}:${password}@aws-0-${region}.pooler.supabase.com:5432/postgres`
-      const prisma = new PrismaClient({
-        datasourceUrl: poolerUrl
-      })
-      await prisma.$queryRaw`SELECT 1`
-      results[`pooler-${region}`] = "SUCCESS"
+      const directUrl = `postgresql://postgres:${encodeURIComponent(password)}@db.${projectId}.supabase.co:5432/postgres?sslmode=require`
+      const prisma = new PrismaClient({ datasourceUrl: directUrl })
+      await prisma.$queryRaw`SELECT 1 as test`
+      results[`direct-pw${password.length}`] = "SUCCESS"
       await prisma.$disconnect()
     } catch (err: any) {
-      results[`pooler-${region}`] = err.message?.slice(0, 100) || "failed"
+      results[`direct-pw${password.length}`] = err.message?.slice(0, 150) || "failed"
     }
-  }
-  
-  // Test transaction mode pooler (port 6543)
-  for (const region of regions) {
-    try {
-      const txUrl = `postgresql://postgres.${projectId}:${password}@aws-0-${region}.pooler.supabase.com:6543/postgres`
-      const prisma = new PrismaClient({
-        datasourceUrl: txUrl
-      })
-      await prisma.$queryRaw`SELECT 1`
-      results[`tx-${region}`] = "SUCCESS"
-      await prisma.$disconnect()
-    } catch (err: any) {
-      results[`tx-${region}`] = err.message?.slice(0, 100) || "failed"
+
+    // Test pooler connections
+    for (const region of regions) {
+      try {
+        const poolerUrl = `postgresql://postgres.${projectId}:${encodeURIComponent(password)}@aws-0-${region}.pooler.supabase.com:6543/postgres?sslmode=require&pgbouncer=true`
+        const prisma = new PrismaClient({ datasourceUrl: poolerUrl })
+        await prisma.$queryRaw`SELECT 1 as test`
+        results[`pooler6543-${region}-pw${password.length}`] = "SUCCESS"
+        await prisma.$disconnect()
+      } catch (err: any) {
+        results[`pooler6543-${region}-pw${password.length}`] = err.message?.slice(0, 150) || "failed"
+      }
+    }
+
+    // Test session mode pooler (port 5432)
+    for (const region of regions) {
+      try {
+        const sessionUrl = `postgresql://postgres.${projectId}:${encodeURIComponent(password)}@aws-0-${region}.pooler.supabase.com:5432/postgres?sslmode=require`
+        const prisma = new PrismaClient({ datasourceUrl: sessionUrl })
+        await prisma.$queryRaw`SELECT 1 as test`
+        results[`pooler5432-${region}-pw${password.length}`] = "SUCCESS"
+        await prisma.$disconnect()
+      } catch (err: any) {
+        results[`pooler5432-${region}-pw${password.length}`] = err.message?.slice(0, 150) || "failed"
+      }
     }
   }
   
