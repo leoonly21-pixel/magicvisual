@@ -900,7 +900,9 @@ function EditorSection({ userPlan, photosUsed, photosLimit, userId, onPlanUpdate
       setProcessingStep('Generando imagen hiperrealista con IA...')
       setProcessingProgress(35)
 
-      const response = await fetch('/api/edit', {
+      const AI_API_URL = process.env.NEXT_PUBLIC_AI_API_URL || '/api/edit'
+
+      const response = await fetch(AI_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

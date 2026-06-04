@@ -6,6 +6,11 @@ const nextConfig: NextConfig = {
   },
   reactStrictMode: false,
   serverExternalPackages: ["sharp"],
+  experimental: {
+    serverActions: {
+      bodySizeLimit: '50mb',
+    },
+  },
 };
 
 export default nextConfig;
