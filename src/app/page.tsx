@@ -530,6 +530,7 @@ function ImageResultDialog({ open, onClose, imageUrl, hasWatermark }: {
   hasWatermark: boolean
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const [isDownloading, setIsDownloading] = useState(false)
 
   useEffect(() => {
     if (!open || !imageUrl || !canvasRef.current) return
@@ -546,40 +547,54 @@ function ImageResultDialog({ open, onClose, imageUrl, hasWatermark }: {
 
       if (hasWatermark) {
         ctx.save()
-        ctx.globalAlpha = 0.15
-        ctx.font = `${Math.max(24, img.width * 0.06)}px sans-serif`
+        ctx.globalAlpha = 0.12
+        ctx.font = `bold ${Math.max(20, img.width * 0.05)}px Arial, sans-serif`
         ctx.fillStyle = '#ffffff'
         ctx.textAlign = 'center'
         ctx.translate(img.width / 2, img.height / 2)
         ctx.rotate(-Math.PI / 6)
-        for (let y = -img.height; y < img.height; y += 120) {
-          for (let x = -img.width; x < img.width; x += 400) {
+        for (let y = -img.height; y < img.height; y += 100) {
+          for (let x = -img.width; x < img.width; x += 350) {
             ctx.fillText('MagicVisual', x, y)
           }
         }
         ctx.restore()
       }
     }
+    img.onerror = () => {
+      console.error('Failed to load result image')
+    }
     img.src = imageUrl
   }, [open, imageUrl, hasWatermark])
 
   const handleDownload = () => {
     if (!canvasRef.current) return
-    const link = document.createElement('a')
-    link.download = `magicvisual-result-${Date.now()}.png`
-    link.href = canvasRef.current.toDataURL('image/png')
-    link.click()
+    setIsDownloading(true)
+    try {
+      const link = document.createElement('a')
+      link.download = `magicvisual-ia-${Date.now()}.png`
+      link.href = canvasRef.current.toDataURL('image/png')
+      link.click()
+    } catch (e) {
+      console.error('Download error:', e)
+      // Fallback: open image in new tab
+      if (imageUrl) {
+        window.open(imageUrl, '_blank')
+      }
+    } finally {
+      setIsDownloading(false)
+    }
   }
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="glass-strong sm:max-w-2xl">
+      <DialogContent className="glass-strong sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="text-gradient-crimson text-2xl font-bold">
-            Resultado
+            Resultado IA Hiperrealista
           </DialogTitle>
           <DialogDescription className="text-muted-foreground">
-            {hasWatermark ? 'Imagen con marca de agua (plan gratuito)' : 'Tu imagen mejorada con IA'}
+            {hasWatermark ? 'Imagen con marca de agua (plan gratuito) - Actualiza a Pro para sin marca' : 'Tu imagen generada con IA hiperrealista - Sin marca de agua'}
           </DialogDescription>
         </DialogHeader>
         <div className="relative overflow-hidden rounded-lg">
@@ -594,9 +609,14 @@ function ImageResultDialog({ open, onClose, imageUrl, hasWatermark }: {
           <Button
             className="bg-crimson hover:bg-crimson-dark text-white glow-crimson"
             onClick={handleDownload}
+            disabled={isDownloading}
           >
-            <Download className="mr-2 h-4 w-4" />
-            Descargar
+            {isDownloading ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="mr-2 h-4 w-4" />
+            )}
+            Descargar HD
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -791,6 +811,9 @@ function EditorSection({ userPlan, photosUsed, photosLimit, userId, onPlanUpdate
   const [resultImage, setResultImage] = useState<string | null>(null)
   const [showResult, setShowResult] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
+  const [processingStep, setProcessingStep] = useState<string>('')
+  const [processingProgress, setProcessingProgress] = useState(0)
+  const [localPhotosUsed, setLocalPhotosUsed] = useState(photosUsed)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const currentBranch = BRANCHES.find(b => b.id === selectedBranch)!
@@ -802,10 +825,36 @@ function EditorSection({ userPlan, photosUsed, photosLimit, userId, onPlanUpdate
       toast.error('Solo se permiten imágenes')
       return
     }
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error('La imagen no puede superar 10MB')
+      return
+    }
+    // Resize image for faster upload while keeping quality
     const reader = new FileReader()
     reader.onload = e => {
-      setUploadedImage(e.target?.result as string)
-      setResultImage(null)
+      const img = new window.Image()
+      img.onload = () => {
+        const canvas = document.createElement('canvas')
+        const MAX_SIZE = 1024
+        let { width, height } = img
+        if (width > MAX_SIZE || height > MAX_SIZE) {
+          if (width > height) {
+            height = (height / width) * MAX_SIZE
+            width = MAX_SIZE
+          } else {
+            width = (width / height) * MAX_SIZE
+            height = MAX_SIZE
+          }
+        }
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext('2d')!
+        ctx.drawImage(img, 0, 0, width, height)
+        const resized = canvas.toDataURL('image/jpeg', 0.85)
+        setUploadedImage(resized)
+        setResultImage(null)
+      }
+      img.src = e.target?.result as string
     }
     reader.readAsDataURL(file)
   }, [])
@@ -826,20 +875,88 @@ function EditorSection({ userPlan, photosUsed, photosLimit, userId, onPlanUpdate
       toast.error('Selecciona un background o escribe un escenario')
       return
     }
-    if (!canEdit) {
+    if (localPhotosUsed >= photosLimit) {
       toast.error('Límite de fotos alcanzado. Actualiza tu plan.')
       return
     }
 
     setIsProcessing(true)
+    setProcessingStep('Analizando tu foto con IA...')
+    setProcessingProgress(10)
 
-    // Simulate AI processing
-    await new Promise(resolve => setTimeout(resolve, 3000))
+    try {
+      // Step 1: Analyze image with VLM
+      setProcessingStep('La IA está analizando tu foto...')
+      setProcessingProgress(20)
 
-    // For demo, use the uploaded image as result
-    setResultImage(uploadedImage)
-    setIsProcessing(false)
-    setShowResult(true)
+      // Simulate progress while waiting
+      const progressInterval = setInterval(() => {
+        setProcessingProgress(prev => {
+          if (prev >= 90) { clearInterval(progressInterval); return 90 }
+          return prev + Math.random() * 8
+        })
+      }, 2000)
+
+      setProcessingStep('Generando imagen hiperrealista con IA...')
+      setProcessingProgress(35)
+
+      const response = await fetch('/api/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image: uploadedImage,
+          branch: selectedBranch,
+          backgroundId: selectedBackground,
+          customScenario,
+          customOutfit
+        })
+      })
+
+      clearInterval(progressInterval)
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || 'Error al procesar la imagen')
+      }
+
+      setProcessingStep('Finalizando...')
+      setProcessingProgress(95)
+
+      const data = await response.json()
+
+      if (data.resultImage) {
+        setResultImage(data.resultImage)
+        setShowResult(true)
+        setProcessingProgress(100)
+
+        // Increment photo usage
+        try {
+          const usageRes = await fetch('/api/user/usage', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId })
+          })
+          if (usageRes.ok) {
+            const usageData = await usageRes.json()
+            setLocalPhotosUsed(usageData.photosUsed)
+          }
+        } catch {
+          // Non-critical: usage update failed
+        }
+
+        toast.success('Imagen generada con IA hiperrealista')
+      } else {
+        throw new Error('No se recibió imagen del servidor')
+      }
+
+    } catch (error: any) {
+      console.error('Edit error:', error)
+      toast.error(error.message || 'Error al procesar la imagen. Intenta de nuevo.')
+    } finally {
+      setIsProcessing(false)
+      setProcessingStep('')
+      setProcessingProgress(0)
+    }
   }
 
   return (
@@ -858,7 +975,7 @@ function EditorSection({ userPlan, photosUsed, photosLimit, userId, onPlanUpdate
           <div className="flex items-center gap-3 mt-3">
             <Badge variant="secondary" className="bg-secondary/50">
               <ImageIcon className="mr-1 h-3 w-3" />
-              {photosUsed}/{photosLimit} fotos usadas
+              {localPhotosUsed}/{photosLimit} fotos usadas
             </Badge>
             <Badge className={isFree ? 'bg-muted text-muted-foreground' : 'bg-gold/20 text-gold'}>
               <Crown className="mr-1 h-3 w-3" />
@@ -1049,19 +1166,27 @@ function EditorSection({ userPlan, photosUsed, photosLimit, userId, onPlanUpdate
             </Card>
 
             {/* Action Button */}
-            <motion.div whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.98 }}>
+            <motion.div whileHover={{ scale: isProcessing ? 1 : 1.02 }} whileTap={{ scale: isProcessing ? 1 : 0.98 }}>
               <Button
                 size="lg"
                 className="w-full bg-crimson hover:bg-crimson-dark text-white glow-crimson py-6 text-lg"
                 onClick={handleProcess}
-                disabled={!uploadedImage || isProcessing || !canEdit}
+                disabled={!uploadedImage || isProcessing || localPhotosUsed >= photosLimit}
               >
                 {isProcessing ? (
-                  <>
-                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                    Procesando con IA...
-                  </>
-                ) : !canEdit ? (
+                  <div className="w-full space-y-2">
+                    <div className="flex items-center justify-center gap-2">
+                      <Loader2 className="h-5 w-5 animate-spin" />
+                      <span>{processingStep || 'Procesando con IA...'}</span>
+                    </div>
+                    <div className="w-full bg-white/20 rounded-full h-2 overflow-hidden">
+                      <div
+                        className="bg-white h-full rounded-full transition-all duration-500 ease-out"
+                        style={{ width: `${Math.min(processingProgress, 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                ) : localPhotosUsed >= photosLimit ? (
                   <>
                     <Crown className="mr-2 h-5 w-5" />
                     Límite alcanzado - Actualiza tu plan
@@ -1069,13 +1194,28 @@ function EditorSection({ userPlan, photosUsed, photosLimit, userId, onPlanUpdate
                 ) : (
                   <>
                     <Sparkles className="mr-2 h-5 w-5" />
-                    Mejorar Foto
+                    Mejorar Foto con IA
                   </>
                 )}
               </Button>
             </motion.div>
 
-            {!canEdit && (
+            {isProcessing && (
+              <Card className="glass border-crimson/30">
+                <CardContent className="py-4">
+                  <div className="text-center space-y-2">
+                    <p className="text-sm text-muted-foreground animate-pulse">
+                      {processingStep || 'Procesando...'}
+                    </p>
+                    <p className="text-xs text-muted-foreground/60">
+                      La IA genera imágenes hiperrealistas - puede tardar 20-40 segundos
+                    </p>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {localPhotosUsed >= photosLimit && !isProcessing && (
               <Card className="glass border-gold/30">
                 <CardContent className="py-4">
                   <div className="flex items-center gap-3">
