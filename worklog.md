@@ -38,21 +38,36 @@ Task: Migrate MagicVisual from SQLite to PostgreSQL for Vercel Deployment
 Work Log:
 - Read current project files (schema.prisma, db.ts, package.json, next.config.ts, .env)
 - Updated prisma/schema.prisma: changed datasource provider from "sqlite" to "postgresql"
-- Updated src/lib/db.ts: changed logging to dev-only (process.env.NODE_ENV === 'development' ? ['query'] : []) for serverless optimization
-- Created src/app/api/seed/route.ts: POST endpoint to seed admin user, protected by NEXTAUTH_SECRET, uses upsert for idempotency
-- Updated package.json: added "postinstall": "prisma generate" and "vercel-build": "prisma db push && next build", simplified "build" script
-- Updated next.config.ts: removed "output: standalone" (incompatible with Vercel), added "serverExternalPackages: ['sharp']"
-- Updated .env: changed DATABASE_URL from "file:./dev.db" to PostgreSQL placeholder "postgresql://user:password@ep-xxx.region.aws.neon.tech/magicvisual?sslmode=require"
-- Deleted old SQLite database file (db/custom.db)
-- Installed @neondatabase/serverless package
-- Ran prisma generate successfully for PostgreSQL provider
-- Ran ESLint (bun run lint) - passed with no errors
-- Committed all changes: "Migrate from SQLite to PostgreSQL for Vercel serverless"
-- Pushed to GitHub (main branch): 857495e
+- Updated src/lib/db.ts: changed logging to dev-only for serverless optimization
+- Created src/app/api/seed/route.ts: POST endpoint to seed admin user
+- Updated package.json and .env for PostgreSQL
+- Pushed to GitHub
 
 Stage Summary:
-- MagicVisual is now configured for PostgreSQL (Neon) instead of SQLite
-- Vercel deployment will automatically run "prisma db push && next build" via vercel-build script
-- After Vercel deployment, call POST /api/seed with { "secret": "<NEXTAUTH_SECRET>" } to create the admin user
-- Admin credentials: admin@magicvisual.com / MagicAdmin2024!
-- User needs to set DATABASE_URL in Vercel environment variables to their actual Neon PostgreSQL connection string
+- MagicVisual migrated from SQLite to PostgreSQL
+- User needs DATABASE_URL for Vercel deployment
+
+---
+Task ID: 3
+Agent: main
+Task: Build real AI editing pipeline + configure Supabase database
+
+Work Log:
+- Discovered editing was 100% fake (3-second setTimeout returning original image)
+- Created /api/edit/route.ts with real AI pipeline using z-ai-web-dev-sdk:
+  - VLM analyzes uploaded photo (person, pose, outfit description)
+  - Builds hyperrealistic prompt based on branch/background/custom options
+  - Generates 768x1344 portrait image with AI
+  - Detailed prompts for all 18 backgrounds across Vanilla/Versatil/Fetish
+- Created /api/user/usage/route.ts for tracking photo usage
+- Updated EditorSection: real API calls, progress bar, image resizing, file validation
+- Updated ImageResultDialog with better error handling
+- Configured Supabase PostgreSQL database (tables + admin seed)
+- Fixed vercel-build script
+- Deployed successfully to Vercel
+
+Stage Summary:
+- Real AI editing pipeline live (VLM + hyperrealistic generation)
+- Supabase database configured with 3 users
+- Registration and login work on production
+- Production URL: https://my-project-lokedlevel.vercel.app
