@@ -4,6 +4,25 @@ import { NextRequest, NextResponse } from 'next/server'
 export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
+// ─── AI Config from Environment ────────────────────────────────────
+const AI_BASE_URL = process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1'
+const AI_API_KEY = process.env.ZAI_API_KEY || 'Z.ai'
+const AI_CHAT_ID = process.env.ZAI_CHAT_ID || ''
+const AI_USER_ID = process.env.ZAI_USER_ID || ''
+const AI_TOKEN = process.env.ZAI_TOKEN || ''
+
+function getAIHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${AI_API_KEY}`,
+    'X-Z-AI-From': 'Z',
+  }
+  if (AI_CHAT_ID) headers['X-Chat-Id'] = AI_CHAT_ID
+  if (AI_USER_ID) headers['X-User-Id'] = AI_USER_ID
+  if (AI_TOKEN) headers['X-Token'] = AI_TOKEN
+  return headers
+}
+
 // ─── Background Description Map ────────────────────────────────────
 const BACKGROUND_PROMPTS: Record<string, string> = {
   // Vanilla
@@ -60,6 +79,15 @@ function buildEditPrompt(params: {
   return prompt
 }
 
+// ─── Download image as base64 ──────────────────────────────────────
+async function downloadImageAsBase64(imageUrl: string): Promise<string> {
+  const response = await fetch(imageUrl)
+  if (!response.ok) throw new Error(`Failed to download image: ${response.status}`)
+  const arrayBuffer = await response.arrayBuffer()
+  const buffer = Buffer.from(arrayBuffer)
+  return buffer.toString('base64')
+}
+
 // ─── POST Handler ──────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
@@ -78,14 +106,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No background or scenario selected' }, { status: 400 })
     }
 
-    // Lazy import to avoid build-time initialization issues
-    const ZAI = (await import('z-ai-web-dev-sdk')).default
-    const zai = await ZAI.create()
+    // ── Step 1: Analyze the image with Vision API ─────────────────
+    console.log('[Edit] Step 1: Analyzing image with Vision AI...')
 
-    // ── Step 1: Analyze the image with VLM ────────────────────────
-    console.log('[Edit] Step 1: Analyzing image with VLM...')
-
-    const analysisResponse = await zai.chat.completions.create({
+    const visionUrl = `${AI_BASE_URL}/chat/completions/vision`
+    const visionBody = {
       messages: [
         {
           role: 'system',
@@ -113,10 +138,24 @@ Be specific but concise. Write as a single paragraph. Do NOT mention you are ana
         }
       ],
       temperature: 0.3,
-      max_tokens: 500
+      max_tokens: 500,
+      thinking: { type: 'disabled' }
+    }
+
+    const visionResponse = await fetch(visionUrl, {
+      method: 'POST',
+      headers: getAIHeaders(),
+      body: JSON.stringify(visionBody)
     })
 
-    const personDescription = analysisResponse.choices?.[0]?.message?.content?.trim() || 'a beautiful woman'
+    if (!visionResponse.ok) {
+      const errorText = await visionResponse.text()
+      console.error('[Edit] Vision API error:', errorText)
+      throw new Error(`Vision analysis failed: ${visionResponse.status}`)
+    }
+
+    const visionData = await visionResponse.json()
+    const personDescription = visionData.choices?.[0]?.message?.content?.trim() || 'a beautiful woman'
 
     console.log('[Edit] Person description:', personDescription.substring(0, 100) + '...')
 
@@ -136,32 +175,46 @@ Be specific but concise. Write as a single paragraph. Do NOT mention you are ana
     // ── Step 3: Generate the hyperrealistic image ──────────────────
     console.log('[Edit] Step 3: Generating image...')
 
-    // Use portrait orientation for content creator photos
-    const imageResponse = await zai.images.generations.create({
+    const imageGenUrl = `${AI_BASE_URL}/images/generations`
+    const imageGenBody = {
       prompt: editPrompt,
       size: '768x1344'
+    }
+
+    const imageGenResponse = await fetch(imageGenUrl, {
+      method: 'POST',
+      headers: getAIHeaders(),
+      body: JSON.stringify(imageGenBody)
     })
 
-    const resultBase64 = imageResponse.data?.[0]?.base64
+    if (!imageGenResponse.ok) {
+      const errorText = await imageGenResponse.text()
+      console.error('[Edit] Image gen error:', errorText)
+      throw new Error(`Image generation failed: ${imageGenResponse.status}`)
+    }
 
-    if (!resultBase64) {
-      // Fallback: try with url if base64 not available
-      const resultUrl = imageResponse.data?.[0]?.url
-      if (resultUrl) {
-        return NextResponse.json({
-          resultImage: resultUrl,
-          prompt: editPrompt,
-          personDescription,
-          success: true
-        })
-      }
-      return NextResponse.json({ error: 'Failed to generate image' }, { status: 500 })
+    const imageGenData = await imageGenResponse.json()
+
+    // Process result - SDK converts URLs to base64, we do the same
+    let resultImage: string | null = null
+
+    if (imageGenData.data?.[0]?.base64) {
+      resultImage = `data:image/png;base64,${imageGenData.data[0].base64}`
+    } else if (imageGenData.data?.[0]?.url) {
+      // Download URL and convert to base64
+      console.log('[Edit] Downloading generated image from URL...')
+      const base64 = await downloadImageAsBase64(imageGenData.data[0].url)
+      resultImage = `data:image/png;base64,${base64}`
+    }
+
+    if (!resultImage) {
+      throw new Error('No image data received from AI service')
     }
 
     console.log('[Edit] Image generated successfully!')
 
     return NextResponse.json({
-      resultImage: `data:image/png;base64,${resultBase64}`,
+      resultImage,
       prompt: editPrompt,
       personDescription,
       success: true
