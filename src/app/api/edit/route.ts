@@ -1,9 +1,40 @@
 import { NextRequest, NextResponse } from 'next/server'
 import ZAI from 'z-ai-web-dev-sdk'
+import fs from 'fs/promises'
+import path from 'path'
 
 // Allow up to 120 seconds for AI processing
 export const maxDuration = 120
 export const dynamic = 'force-dynamic'
+
+// ─── Z AI SDK Config ───────────────────────────────────────────────
+// The SDK only reads from .z-ai-config file, so we need to ensure
+// it exists by writing it from env vars if missing (for Vercel)
+async function ensureConfig(): Promise<void> {
+  const configPath = path.join(process.cwd(), '.z-ai-config')
+
+  // Check if config already exists
+  try {
+    await fs.access(configPath)
+    return // Config exists, nothing to do
+  } catch {
+    // Config doesn't exist, create it from env vars
+    const config = {
+      baseUrl: process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1',
+      apiKey: process.env.ZAI_API_KEY || 'Z.ai',
+      chatId: process.env.ZAI_CHAT_ID || '',
+      userId: process.env.ZAI_USER_ID || '',
+      token: process.env.ZAI_TOKEN || '',
+    }
+
+    if (!config.chatId && !config.token) {
+      console.warn('[Edit] Warning: ZAI_CHAT_ID and ZAI_TOKEN not set. AI features may not work properly.')
+    }
+
+    await fs.writeFile(configPath, JSON.stringify(config), 'utf-8')
+    console.log('[Edit] Created .z-ai-config from environment variables')
+  }
+}
 
 // ─── Background Prompts ────────────────────────────────────────────
 const BACKGROUND_PROMPTS: Record<string, string> = {
@@ -43,6 +74,13 @@ function buildEditPrompt(params: { personDescription: string; branch: string; ba
   return `Hyperrealistic professional photograph of ${personDescription}. ${outfitDesc} Standing in ${backgroundSection}. Photography style: ${styleDesc}. Shot with Canon EOS R5 Mark II, 85mm f/1.2 L lens at f/1.4. Ultra-high resolution, 8K UHD, photorealistic skin texture, natural skin tones, studio-quality post-processing, magazine cover quality, sharp focus on eyes, cinematic color grading. No artificial smoothing. Raw, authentic, hyperrealistic photography.`
 }
 
+async function downloadImageAsBase64(imageUrl: string): Promise<string> {
+  const response = await fetch(imageUrl)
+  if (!response.ok) throw new Error(`Failed to download image: ${response.status}`)
+  const arrayBuffer = await response.arrayBuffer()
+  return Buffer.from(arrayBuffer).toString('base64')
+}
+
 // ─── POST Handler ──────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
@@ -53,13 +91,17 @@ export async function POST(req: NextRequest) {
     if (!branch) return NextResponse.json({ error: 'No branch selected' }, { status: 400 })
     if (!backgroundId && !customScenario) return NextResponse.json({ error: 'No background or scenario selected' }, { status: 400 })
 
+    // Ensure .z-ai-config exists (creates from env vars if needed for Vercel)
+    await ensureConfig()
+
     // Initialize Z AI SDK
     console.log('[Edit] Initializing Z AI SDK...')
     const zai = await ZAI.create()
 
     // ── Step 1: Analyze image with Vision API ─────────────────
     console.log('[Edit] Step 1: Analyzing image with Vision...')
-    const visionResponse = await zai.chat.completions.create({
+    const visionResponse = await zai.chat.completions.createVision({
+      model: 'glm-4v-flash',
       messages: [
         {
           role: 'system',
@@ -73,8 +115,7 @@ export async function POST(req: NextRequest) {
           ]
         }
       ],
-      temperature: 0.3,
-      max_tokens: 500,
+      thinking: { type: 'disabled' }
     })
 
     const personDescription = visionResponse.choices?.[0]?.message?.content?.trim() || 'a beautiful woman'
@@ -84,19 +125,49 @@ export async function POST(req: NextRequest) {
     const editPrompt = buildEditPrompt({ personDescription, branch, backgroundId, customScenario, customOutfit })
     console.log('[Edit] Step 2: Prompt built, length:', editPrompt.length)
 
-    // ── Step 3: Generate image ─────────────────────────────────
+    // ── Step 3: Generate image using edit API ──────────────────
+    // The API requires images: [{url: ...}] format for image-to-image
     console.log('[Edit] Step 3: Generating hyperrealistic image...')
-    const imageGenResponse = await zai.images.generations.create({
-      prompt: editPrompt,
-      size: '768x1344'
+
+    const { baseUrl, apiKey, chatId, userId, token } = zai.config
+    const editHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+      'X-Z-AI-From': 'Z',
+    }
+    if (chatId) editHeaders['X-Chat-Id'] = chatId
+    if (userId) editHeaders['X-User-Id'] = userId
+    if (token) editHeaders['X-Token'] = token
+
+    const imageGenResponse = await fetch(`${baseUrl}/images/generations/edit`, {
+      method: 'POST',
+      headers: editHeaders,
+      body: JSON.stringify({
+        prompt: editPrompt,
+        images: [{ url: image }],
+        size: '768x1344'
+      })
     })
 
-    const base64Image = imageGenResponse.data?.[0]?.base64
-    if (!base64Image) {
-      throw new Error('No image data received from AI generation')
+    if (!imageGenResponse.ok) {
+      const errText = await imageGenResponse.text()
+      console.error('[Edit] Image gen error:', errText)
+      throw new Error(`Image generation failed (${imageGenResponse.status})`)
     }
 
-    const resultImage = `data:image/png;base64,${base64Image}`
+    const imageGenData = await imageGenResponse.json()
+
+    let resultImage: string | null = null
+    if (imageGenData.data?.[0]?.base64) {
+      resultImage = `data:image/png;base64,${imageGenData.data[0].base64}`
+    } else if (imageGenData.data?.[0]?.url) {
+      console.log('[Edit] Downloading from URL...')
+      const base64 = await downloadImageAsBase64(imageGenData.data[0].url)
+      resultImage = `data:image/png;base64,${base64}`
+    }
+
+    if (!resultImage) throw new Error('No image data received')
+
     console.log('[Edit] Success! Image generated.')
 
     return NextResponse.json({
