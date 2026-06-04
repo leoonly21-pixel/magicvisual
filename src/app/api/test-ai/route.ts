@@ -12,9 +12,10 @@ export async function GET() {
   }
 
   let connectionTest = 'not-tested'
+  let rawResponse = ''
   try {
     const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), 10000)
+    const timeout = setTimeout(() => controller.abort(), 15000)
 
     const response = await fetch(`${process.env.ZAI_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -34,16 +35,21 @@ export async function GET() {
     })
     clearTimeout(timeout)
 
+    rawResponse = await response.text()
+
     if (response.ok) {
-      const data = await response.json()
-      connectionTest = `OK - ${data.choices?.[0]?.message?.content?.substring(0, 50)}`
+      try {
+        const data = JSON.parse(rawResponse)
+        connectionTest = `OK - content: "${data.choices?.[0]?.message?.content || data.msg || 'no-content'}" | keys: ${Object.keys(data).join(',')}`
+      } catch {
+        connectionTest = `OK but not JSON: ${rawResponse.substring(0, 200)}`
+      }
     } else {
-      const text = await response.text()
-      connectionTest = `FAIL ${response.status}: ${text.substring(0, 100)}`
+      connectionTest = `FAIL ${response.status}: ${rawResponse.substring(0, 200)}`
     }
   } catch (error: any) {
     connectionTest = `ERROR: ${error.message || 'unknown'}`
   }
 
-  return NextResponse.json({ envVars, connectionTest })
+  return NextResponse.json({ envVars, connectionTest, rawResponse: rawResponse.substring(0, 500) })
 }
