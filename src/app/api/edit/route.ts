@@ -8,17 +8,15 @@ export const maxDuration = 120
 export const dynamic = 'force-dynamic'
 
 // ─── Z AI SDK Config ───────────────────────────────────────────────
-// The SDK only reads from .z-ai-config file, so we need to ensure
-// it exists by writing it from env vars if missing (for Vercel)
-async function ensureConfig(): Promise<void> {
-  const configPath = path.join(process.cwd(), '.z-ai-config')
-
-  // Check if config already exists
+// The SDK reads from .z-ai-config file, but Vercel has read-only filesystem.
+// We try the SDK first; if it fails, we instantiate directly with env vars.
+async function getZAI(): Promise<InstanceType<typeof ZAI>> {
   try {
-    await fs.access(configPath)
-    return // Config exists, nothing to do
+    // Try normal SDK initialization (works locally where .z-ai-config exists)
+    return await ZAI.create()
   } catch {
-    // Config doesn't exist, create it from env vars
+    // Fallback: create instance directly from env vars (for Vercel serverless)
+    console.log('[Edit] .z-ai-config not found, using environment variables')
     const config = {
       baseUrl: process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1',
       apiKey: process.env.ZAI_API_KEY || 'Z.ai',
@@ -27,12 +25,18 @@ async function ensureConfig(): Promise<void> {
       token: process.env.ZAI_TOKEN || '',
     }
 
-    if (!config.chatId && !config.token) {
-      console.warn('[Edit] Warning: ZAI_CHAT_ID and ZAI_TOKEN not set. AI features may not work properly.')
+    if (!config.chatId || !config.token) {
+      throw new Error('ZAI_CHAT_ID and ZAI_TOKEN environment variables are required. Please configure them in your Vercel project settings.')
     }
 
-    await fs.writeFile(configPath, JSON.stringify(config), 'utf-8')
-    console.log('[Edit] Created .z-ai-config from environment variables')
+    // Try writing config file for subsequent requests
+    try {
+      await fs.writeFile(path.join(process.cwd(), '.z-ai-config'), JSON.stringify(config), 'utf-8')
+    } catch {
+      // Vercel read-only filesystem - that's fine
+    }
+
+    return new ZAI(config)
   }
 }
 
@@ -91,12 +95,9 @@ export async function POST(req: NextRequest) {
     if (!branch) return NextResponse.json({ error: 'No branch selected' }, { status: 400 })
     if (!backgroundId && !customScenario) return NextResponse.json({ error: 'No background or scenario selected' }, { status: 400 })
 
-    // Ensure .z-ai-config exists (creates from env vars if needed for Vercel)
-    await ensureConfig()
-
-    // Initialize Z AI SDK
+    // Initialize Z AI SDK (with fallback to env vars for Vercel)
     console.log('[Edit] Initializing Z AI SDK...')
-    const zai = await ZAI.create()
+    const zai = await getZAI()
 
     // ── Step 1: Analyze image with Vision API ─────────────────
     console.log('[Edit] Step 1: Analyzing image with Vision...')
