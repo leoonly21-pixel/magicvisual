@@ -1,56 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import fs from 'fs/promises'
-import path from 'path'
+import ZAI from 'z-ai-web-dev-sdk'
 
 // Allow up to 120 seconds for AI processing
 export const maxDuration = 120
 export const dynamic = 'force-dynamic'
-
-// ─── AI Config ─────────────────────────────────────────────────────
-interface AIConfig {
-  baseUrl: string
-  apiKey: string
-  chatId?: string
-  userId?: string
-  token?: string
-}
-
-async function loadAIConfig(): Promise<AIConfig> {
-  // Try .z-ai-config file
-  try {
-    const configStr = await fs.readFile(path.join(process.cwd(), '.z-ai-config'), 'utf-8')
-    const config = JSON.parse(configStr)
-    if (config.baseUrl && config.apiKey) return config
-  } catch {}
-
-  // Try /etc/.z-ai-config
-  try {
-    const configStr = await fs.readFile('/etc/.z-ai-config', 'utf-8')
-    const config = JSON.parse(configStr)
-    if (config.baseUrl && config.apiKey) return config
-  } catch {}
-
-  // Fallback to env vars
-  return {
-    baseUrl: process.env.ZAI_BASE_URL || 'https://internal-api.z.ai/v1',
-    apiKey: process.env.ZAI_API_KEY || 'Z.ai',
-    chatId: process.env.ZAI_CHAT_ID,
-    userId: process.env.ZAI_USER_ID,
-    token: process.env.ZAI_TOKEN,
-  }
-}
-
-function getAIHeaders(config: AIConfig): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${config.apiKey}`,
-    'X-Z-AI-From': 'Z',
-  }
-  if (config.chatId) headers['X-Chat-Id'] = config.chatId
-  if (config.userId) headers['X-User-Id'] = config.userId
-  if (config.token) headers['X-Token'] = config.token
-  return headers
-}
 
 // ─── Background Prompts ────────────────────────────────────────────
 const BACKGROUND_PROMPTS: Record<string, string> = {
@@ -90,13 +43,6 @@ function buildEditPrompt(params: { personDescription: string; branch: string; ba
   return `Hyperrealistic professional photograph of ${personDescription}. ${outfitDesc} Standing in ${backgroundSection}. Photography style: ${styleDesc}. Shot with Canon EOS R5 Mark II, 85mm f/1.2 L lens at f/1.4. Ultra-high resolution, 8K UHD, photorealistic skin texture, natural skin tones, studio-quality post-processing, magazine cover quality, sharp focus on eyes, cinematic color grading. No artificial smoothing. Raw, authentic, hyperrealistic photography.`
 }
 
-async function downloadImageAsBase64(imageUrl: string): Promise<string> {
-  const response = await fetch(imageUrl)
-  if (!response.ok) throw new Error(`Failed to download image: ${response.status}`)
-  const arrayBuffer = await response.arrayBuffer()
-  return Buffer.from(arrayBuffer).toString('base64')
-}
-
 // ─── POST Handler ──────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
@@ -107,81 +53,64 @@ export async function POST(req: NextRequest) {
     if (!branch) return NextResponse.json({ error: 'No branch selected' }, { status: 400 })
     if (!backgroundId && !customScenario) return NextResponse.json({ error: 'No background or scenario selected' }, { status: 400 })
 
-    const config = await loadAIConfig()
-    const headers = getAIHeaders(config)
-
-    console.log('[Edit] Using API base URL:', config.baseUrl)
+    // Initialize Z AI SDK
+    console.log('[Edit] Initializing Z AI SDK...')
+    const zai = await ZAI.create()
 
     // ── Step 1: Analyze image with Vision API ─────────────────
-    console.log('[Edit] Step 1: Analyzing image...')
-    const visionUrl = `${config.baseUrl}/chat/completions/vision`
-
-    const visionResponse = await fetch(visionUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        messages: [
-          { role: 'system', content: 'You are a professional photographer. Describe the person in this photo in precise physical detail for an AI recreation. Focus on: physical appearance (age range, body type, skin tone), face (eye color, hair, features), pose, outfit, and expression. One concise paragraph.' },
-          { role: 'user', content: [
+    console.log('[Edit] Step 1: Analyzing image with Vision...')
+    const visionResponse = await zai.chat.completions.create({
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a professional photographer. Describe the person in this photo in precise physical detail for an AI recreation. Focus on: physical appearance (age range, body type, skin tone), face (eye color, hair, features), pose, outfit, and expression. One concise paragraph.'
+        },
+        {
+          role: 'user',
+          content: [
             { type: 'text', text: 'Describe the person in this photo for AI recreation.' },
             { type: 'image_url', image_url: { url: image } }
-          ]}
-        ],
-        temperature: 0.3,
-        max_tokens: 500,
-        thinking: { type: 'disabled' }
-      })
+          ]
+        }
+      ],
+      temperature: 0.3,
+      max_tokens: 500,
     })
 
-    if (!visionResponse.ok) {
-      const err = await visionResponse.text()
-      console.error('[Edit] Vision error:', err)
-      throw new Error(`Vision analysis failed (${visionResponse.status})`)
-    }
-
-    const visionData = await visionResponse.json()
-    const personDescription = visionData.choices?.[0]?.message?.content?.trim() || 'a beautiful woman'
-    console.log('[Edit] Person:', personDescription.substring(0, 80) + '...')
+    const personDescription = visionResponse.choices?.[0]?.message?.content?.trim() || 'a beautiful woman'
+    console.log('[Edit] Person description:', personDescription.substring(0, 80) + '...')
 
     // ── Step 2: Build prompt ───────────────────────────────────
     const editPrompt = buildEditPrompt({ personDescription, branch, backgroundId, customScenario, customOutfit })
-    console.log('[Edit] Step 2: Prompt built')
+    console.log('[Edit] Step 2: Prompt built, length:', editPrompt.length)
 
     // ── Step 3: Generate image ─────────────────────────────────
-    console.log('[Edit] Step 3: Generating image...')
-    const imageGenUrl = `${config.baseUrl}/images/generations`
-
-    const imageGenResponse = await fetch(imageGenUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ prompt: editPrompt, size: '768x1344' })
+    console.log('[Edit] Step 3: Generating hyperrealistic image...')
+    const imageGenResponse = await zai.images.generations.create({
+      prompt: editPrompt,
+      size: '768x1344'
     })
 
-    if (!imageGenResponse.ok) {
-      const err = await imageGenResponse.text()
-      console.error('[Edit] Image gen error:', err)
-      throw new Error(`Image generation failed (${imageGenResponse.status})`)
+    const base64Image = imageGenResponse.data?.[0]?.base64
+    if (!base64Image) {
+      throw new Error('No image data received from AI generation')
     }
 
-    const imageGenData = await imageGenResponse.json()
+    const resultImage = `data:image/png;base64,${base64Image}`
+    console.log('[Edit] Success! Image generated.')
 
-    let resultImage: string | null = null
-    if (imageGenData.data?.[0]?.base64) {
-      resultImage = `data:image/png;base64,${imageGenData.data[0].base64}`
-    } else if (imageGenData.data?.[0]?.url) {
-      console.log('[Edit] Downloading from URL...')
-      const base64 = await downloadImageAsBase64(imageGenData.data[0].url)
-      resultImage = `data:image/png;base64,${base64}`
-    }
-
-    if (!resultImage) throw new Error('No image data received')
-
-    console.log('[Edit] Success!')
-
-    return NextResponse.json({ resultImage, prompt: editPrompt, personDescription, success: true })
+    return NextResponse.json({
+      resultImage,
+      prompt: editPrompt,
+      personDescription,
+      success: true
+    })
 
   } catch (error: any) {
     console.error('[Edit] Error:', error)
-    return NextResponse.json({ error: error.message || 'Error processing image' }, { status: 500 })
+    return NextResponse.json(
+      { error: error.message || 'Error processing image' },
+      { status: 500 }
+    )
   }
 }
